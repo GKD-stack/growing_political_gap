@@ -1,0 +1,280 @@
+---
+title: "Political Science"
+output: html_notebook
+---
+
+
+```{r}
+GSS_ascii <- read.table("GSS.dat", header = TRUE, sep = "", fill = TRUE)
+
+```
+
+
+```{r}
+#install.packages("readxl")
+library(readxl)
+library(dplyr)
+library(ggplot2)
+library("devtools"); install_github("lme4/lme4",dependencies=TRUE)
+library(lme4)
+library(Matrix)
+library(nlme)
+library(effects)
+```
+
+```{r}
+GSS <- read_excel("GSS.xlsx")  
+GSS <- GSS %>%
+  mutate(
+    polviews = as.numeric(polviews),
+    sex = as.numeric(sex),
+    year = as.numeric(year),
+    race = as.numeric(race),
+    realrinc = as.numeric(realrinc),
+    degree = as.numeric(degree)
+  ) %>%
+  
+  filter(polviews > 0, sex > 0, year > 0, race > 0, realrinc > 0, degree > -1) %>%
+  
+  mutate(
+    income_cat = ntile(realrinc, 5)  
+  ) %>%
+  
+  filter(age >= 18 & age <= 34) %>%
+  
+  select(-id_)
+
+```
+
+Subset Division
+```{r}
+# 1 male, 2 female 
+
+male <- GSS %>% 
+  filter(sex==1) 
+  
+fem <- GSS %>% 
+  filter(sex==2) 
+```
+
+## On Average Time Series Analysis 
+
+```{r}
+label_mapping <- list(
+  race = c("1" = "White", "2" = "Black", "3" = "Other"),
+  degree = c("0" = "Less than High School", "1" = "High School", "2" = "Associate/ Junior College", "3" = "Bachelor's", "4"= "Graduate"),
+  income_cat = c("1" = "Low Income", "2" = "Low to Middle Income","3" = "Middle Income", "4" = "Middle to High Income", "5" = "High Income")
+)
+
+```
+
+```{r}
+format_var_name <- function(var_name) {
+  var_name %>%
+    gsub("_", " ", .) %>%  
+    gsub("cat", "", .) %>%  
+    trimws() %>%  
+    tools::toTitleCase()  
+}
+
+data_frames <- list(GSS = GSS, Male = male, Female = fem)
+group_vars <- c("race", "degree", "income_cat")
+for (df_name in names(data_frames)) {
+  df <- data_frames[[df_name]]
+  
+
+  for (group_var in group_vars) {   
+    # Aggregate data 
+    avg_data <- df %>%
+      filter(polviews > 0, !!sym(group_var) > 0) %>%
+      group_by(year, !!sym(group_var)) %>%
+      summarize(mean_polviews = mean(polviews, na.rm = TRUE), .groups = "drop") 
+    
+    avg_data <- avg_data %>%
+      mutate(!!sym(group_var) := factor(!!sym(group_var), 
+                                         levels = names(label_mapping[[group_var]]), 
+                                         labels = label_mapping[[group_var]]))
+    
+    
+    formatted_group_var <- format_var_name(group_var)
+    
+    plot <- ggplot(avg_data, aes(x = year, y = mean_polviews, group = factor(!!sym(group_var)), color = factor(!!sym(group_var)))) +
+      geom_line(size = 1) + 
+      labs(title = paste("Average Political Views by Year -", tools::toTitleCase(df_name)),
+           subtitle = paste("Grouped by", formatted_group_var),
+           x = "Year", 
+           y = "Average Political Views", 
+           color = formatted_group_var) +
+      theme_minimal(base_family = "Times New Roman") +
+      theme(legend.title = element_text(size = 12),
+            legend.text = element_text(size = 10),
+            plot.title = element_text(hjust = 0.5),
+            plot.subtitle = element_text(hjust = 0.5))
+    
+   
+    print(plot)
+    
+    ggsave(filename = paste0("plot_", df_name, "_", group_var, ".png"), plot = plot, width = 10, height = 6)
+  }
+}
+```
+
+## PCA
+```{r}
+df_scaled <- scale(GSS %>% select_if(is.numeric))  
+pca_result <- prcomp(df_scaled, center = TRUE, scale. = TRUE)
+summary(pca_result)
+
+```
+```{r}
+# Scree plot
+explained_variance <- pca_result$sdev^2 / sum(pca_result$sdev^2) * 100
+pca_df <- data.frame(
+  Principal_Component = 1:length(explained_variance),
+  Explained_Variance = explained_variance
+)
+
+
+scree_plot <- ggplot(pca_df, aes(x = Principal_Component, y = Explained_Variance)) +
+  geom_line(color = "blue", size = 1.2) +
+  geom_point(color = "red", size = 2) +
+  labs(
+    title = "Scree Plot",
+    x = "Principal Components",
+    y = "Percentage of Explained Variance"
+  ) +
+  theme_minimal(base_family = "Times New Roman") +
+  theme(
+    plot.title = element_text(hjust = 0.5, size = 16),
+    axis.title = element_text(size = 14),
+    axis.text = element_text(size = 12)
+  ) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "gray")
+
+
+ggsave("scree_plot.png", plot = scree_plot, width = 8, height = 6)
+```
+
+```{r}
+selected_pcs <- pca_result$x[, 1:4]  
+loadings_selected <- pca_result$rotation[, 1:4] 
+print(loadings_selected)
+
+```
+
+## Multi Level Model
+
+
+```{r}
+model_summaries <- list()
+
+
+for (df_name in names(data_frames)) {
+  df <- data_frames[[df_name]]
+  
+  if (df_name == "GSS") {
+    model <- lme(polviews ~ sex + realrinc + degree + race, random = ~1 | year, data = df)
+  } else {
+    model <- lme(polviews ~ realrinc + degree + race, random = ~1 | year, data = df)
+  }
+  
+  model_summaries[[df_name]] <- summary(model)
+}
+
+model_summaries
+```
+
+### All of the Interactions 
+```{r}
+interaction_model_summaries <- list()
+
+
+for (df_name in names(data_frames)) {
+  df <- data_frames[[df_name]]
+  
+
+  if (df_name == "GSS") {
+    model <- lme(polviews ~ realrinc + degree + race + sex + 
+               sex*realrinc + race*realrinc + sex*degree + degree*race + realrinc*degree, 
+             random = ~1 | year, data = df)
+  } else {
+    model <- lme(polviews ~ realrinc + degree + race  + race*realrinc + degree*race + realrinc*degree, random = ~1 | year, data = df)
+  }
+  
+  interaction_model_summaries[[df_name]] <- summary(model)
+}
+
+
+interaction_model_summaries
+```
+
+```{r}
+analyze_random_effects <- function(model, df_name) {
+  re <- ranef(model)
+    re_df <- data.frame(year = as.numeric(rownames(re)),
+                      random_effect = re[, 1])
+  
+  p <- ggplot(re_df, aes(x = year, y = random_effect)) +
+    geom_point() +
+    geom_line() +
+    geom_hline(yintercept = 0, linetype = "dashed", color = "red") +
+    labs(title = paste("Random Effects over Time -", df_name),
+         x = "Year",
+         y = "Random Effect") +
+    theme_minimal()
+  
+  re_summary <- re_df %>%
+    summarize(
+      mean = mean(random_effect),
+      sd = sd(random_effect),
+      min = min(random_effect),
+      max = max(random_effect)
+    )
+
+  # get icc
+  vc <- VarCorr(model)
+  random_intercept_var <- as.numeric(vc[1, 1])
+  residual_var <- as.numeric(vc[2, 1])
+  icc <- random_intercept_var / (random_intercept_var + residual_var)
+
+  # get outliers
+  re_mean <- mean(re_df$random_effect)
+  re_sd <- sd(re_df$random_effect)
+  outliers <- re_df %>%
+    filter(abs(random_effect - re_mean) > 2 * re_sd)
+  
+  return(list(
+    plot = p,
+    summary = re_summary,
+    icc = round(icc, 3),
+    outliers = outliers,
+    data = re_df
+  ))
+}
+
+
+random_effects_results <- list()
+
+for (df_name in names(data_frames)) {
+  df <- data_frames[[df_name]]
+  
+
+  if (df_name == "GSS") {
+    model <- lme(polviews ~ realrinc + degree + race + sex + 
+                   sex*realrinc + race*realrinc + sex*degree + degree*race + realrinc*degree, 
+                 random = ~1 | year, data = df)
+  } else {
+    model <- lme(polviews ~ realrinc + degree + race + race*realrinc + degree*race + realrinc*degree, 
+                 random = ~1 | year, data = df)
+  }
+  
+  random_effects_results[[df_name]] <- analyze_random_effects(model, df_name)
+}
+```
+
+
+```{r}
+print(random_effects_results[["Female"]]$plot)
+print(random_effects_results[["Female"]]$icc)
+print(random_effects_results[["Female"]]$outliers)
+```
